@@ -105,7 +105,9 @@ if (!SR) {
   const rec = new SR();
   rec.lang = "en-US";
   rec.interimResults = false;
+  let gotOutcome = false; // this session produced a result or showed an error
   rec.onresult = (e: any) => {
+    gotOutcome = true;
     const text: string = e.results[0][0].transcript;
     input.value = text;
     handle(text);
@@ -115,12 +117,12 @@ if (!SR) {
   rec.onend = () => {
     listening = false;
     mic.classList.remove("listening");
-    // Nothing else replaced the status, so no result or error arrived.
-    if (statusEl.textContent === "Listening…") say("Stopped listening.");
+    if (!gotOutcome) say("Stopped listening.");
   };
   rec.onerror = (e: any) => {
     // Stopping before saying anything is not an error worth showing.
     if (stoppedByUser && e.error === "no-speech") return;
+    gotOutcome = true;
     say(`Mic error: ${e.error}`);
   };
   mic.addEventListener("click", () => {
@@ -131,6 +133,7 @@ if (!SR) {
       return rec.stop();
     }
     stoppedByUser = false;
+    gotOutcome = false;
     speechSynthesis.cancel();
     mic.classList.add("listening");
     say("Listening…");
