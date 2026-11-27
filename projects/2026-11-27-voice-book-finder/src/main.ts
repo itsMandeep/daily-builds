@@ -78,12 +78,20 @@ function render(books: Book[]) {
   }
 }
 
+// The mic must never be open while we talk, or it hears the results and searches them again.
+let micClosed: Promise<void> = Promise.resolve();
+let micSessions = 0;
+
 async function handle(query: string) {
   if (!query.trim()) return;
+  const sessionsAtStart = micSessions;
   say("Thinking…");
   await ready;
   const top = await recommend(query);
   render(top);
+  await micClosed;
+  // The mic was turned on again during this search: show the books, but don't talk over the user.
+  if (micSessions !== sessionsAtStart) return;
   say(`Top 3 for "${query}"`);
   speak(
     "Here are three picks. " +
@@ -91,8 +99,12 @@ async function handle(query: string) {
   );
 }
 
+let discardMic = () => {}; // set below when speech recognition is supported
+
 form.addEventListener("submit", (e) => {
   e.preventDefault();
+  if (!input.value.trim()) return;
+  discardMic();
   handle(input.value);
 });
 
@@ -105,17 +117,61 @@ if (!SR) {
   const rec = new SR();
   rec.lang = "en-US";
   rec.interimResults = false;
+  rec.continuous = false;
+  let accepting = false; // true until this session's request is taken or thrown away
+  let markClosed = () => {};
+  let gotOutcome = false; // this session produced a result or showed an error
   rec.onresult = (e: any) => {
-    const text: string = e.results[0][0].transcript;
-    input.value = text;
-    handle(text);
+    // Some browsers keep listening and send more results, so take only the first final one.
+    if (!accepting) return;
+    const final = Array.from(e.results as ArrayLike<any>).slice(e.resultIndex).find((r) => r.isFinal);
+    if (!final) return;
+    accepting = false;
+    gotOutcome = true;
+    input.value = final[0].transcript;
+    rec.abort(); // unlike stop(), this can't deliver another result
+    handle(final[0].transcript); // shows the books now, speaks only after the mic has closed
   };
-  rec.onend = () => mic.classList.remove("listening");
-  rec.onerror = (e: any) => say(`Mic error: ${e.error}`);
+  let listening = false;
+  let stoppedByUser = false;
+  rec.onend = () => {
+    listening = false;
+    accepting = false;
+    mic.classList.remove("listening");
+    markClosed();
+    if (!gotOutcome) say("Stopped listening.");
+  };
+  rec.onerror = (e: any) => {
+    // Stopping before saying anything is not an error worth showing.
+    if (stoppedByUser && e.error === "no-speech") return;
+    // Our own abort(), after taking or discarding the request.
+    if (!accepting && e.error === "aborted") return;
+    gotOutcome = true;
+    say(`Mic error: ${e.error}`);
+  };
   mic.addEventListener("click", () => {
+    // start() throws if recognition is already running, so a second click means "done speaking":
+    // stop() still returns a result for audio already captured (abort() would discard it).
+    if (listening) {
+      stoppedByUser = true;
+      return rec.stop();
+    }
+    stoppedByUser = false;
+    gotOutcome = false;
     speechSynthesis.cancel();
+    micSessions++;
     mic.classList.add("listening");
     say("Listening…");
     rec.start();
+    listening = true;
+    accepting = true;
+    micClosed = new Promise((resolve) => (markClosed = resolve));
   });
+  // A typed search replaces whatever the mic was about to hear.
+  discardMic = () => {
+    if (!listening) return;
+    accepting = false;
+    gotOutcome = true;
+    rec.abort();
+  };
 }
