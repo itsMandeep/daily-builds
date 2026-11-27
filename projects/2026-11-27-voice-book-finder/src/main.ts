@@ -110,12 +110,31 @@ if (!SR) {
     input.value = text;
     handle(text);
   };
-  rec.onend = () => mic.classList.remove("listening");
-  rec.onerror = (e: any) => say(`Mic error: ${e.error}`);
+  let listening = false;
+  let stoppedByUser = false;
+  rec.onend = () => {
+    listening = false;
+    mic.classList.remove("listening");
+    // Nothing else replaced the status, so no result or error arrived.
+    if (statusEl.textContent === "Listening…") say("Stopped listening.");
+  };
+  rec.onerror = (e: any) => {
+    // Stopping before saying anything is not an error worth showing.
+    if (stoppedByUser && e.error === "no-speech") return;
+    say(`Mic error: ${e.error}`);
+  };
   mic.addEventListener("click", () => {
+    // start() throws if recognition is already running, so a second click means "done speaking":
+    // stop() still returns a result for audio already captured (abort() would discard it).
+    if (listening) {
+      stoppedByUser = true;
+      return rec.stop();
+    }
+    stoppedByUser = false;
     speechSynthesis.cancel();
     mic.classList.add("listening");
     say("Listening…");
     rec.start();
+    listening = true;
   });
 }
