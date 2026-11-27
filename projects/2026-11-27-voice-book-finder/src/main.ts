@@ -1,0 +1,121 @@
+import { BOOKS, type Book } from "./books.js";
+
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const form = $<HTMLFormElement>("form");
+const input = $<HTMLInputElement>("q");
+const mic = $<HTMLButtonElement>("mic");
+const statusEl = $<HTMLDivElement>("status");
+const results = $<HTMLOListElement>("results");
+
+const say = (msg: string) => (statusEl.textContent = msg);
+const bookText = (b: Book) => `${b.title}. ${b.tags.join(", ")}. ${b.summary}`;
+
+// ---- Small open-source model: all-MiniLM-L6-v2 sentence embeddings via Transformers.js ----
+type Embed = (texts: string[]) => Promise<number[][]>;
+const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1";
+
+async function loadModel(): Promise<Embed> {
+  const { pipeline } = await import(/* @vite-ignore */ TRANSFORMERS_URL as string);
+  const extractor = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
+  return async (texts) => (await extractor(texts, { pooling: "mean", normalize: true })).tolist();
+}
+
+let embed: Embed | null = null;
+let bookVectors: number[][] | null = null;
+const ready = loadModel()
+  .then(async (e) => {
+    embed = e;
+    bookVectors = await e(BOOKS.map(bookText));
+    say("Model ready (all-MiniLM-L6-v2). Ask away.");
+  })
+  .catch((err) => {
+    console.warn("Model failed to load, using keyword matching", err);
+    say("Model unavailable, using keyword matching.");
+  });
+say("Loading small model…");
+
+const dot = (a: number[], b: number[]) => a.reduce((s, v, i) => s + v * b[i], 0);
+
+const STOP = new Set("want read book books about something some like the and for with that this give recommend".split(" "));
+
+function keywordScore(query: string, b: Book): number {
+  const words = (query.toLowerCase().match(/[a-z]+/g) ?? []).filter((w) => !STOP.has(w));
+  const hay = bookText(b).toLowerCase();
+  return words.filter((w) => w.length > 2 && hay.includes(w)).length;
+}
+
+async function recommend(query: string): Promise<Book[]> {
+  let scores: number[];
+  if (embed && bookVectors) {
+    const [q] = await embed([query]);
+    // Blend semantic similarity with a small keyword boost for exact topic hits.
+    scores = bookVectors.map((v, i) => dot(q, v) + 0.05 * keywordScore(query, BOOKS[i]));
+  } else {
+    scores = BOOKS.map((b) => keywordScore(query, b));
+  }
+  return BOOKS.map((b, i) => ({ b, s: scores[i] }))
+    .sort((x, y) => y.s - x.s)
+    .slice(0, 3)
+    .map((x) => x.b);
+}
+
+// ---- Voice out: Web Speech synthesis ----
+function speak(text: string) {
+  if (!("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+}
+
+function render(books: Book[]) {
+  results.innerHTML = "";
+  for (const b of books) {
+    const li = document.createElement("li");
+    li.innerHTML = `<h2></h2><div class="author"></div><p></p>`;
+    li.querySelector("h2")!.textContent = b.title;
+    li.querySelector(".author")!.textContent = b.author;
+    li.querySelector("p")!.innerText = b.summary;
+    results.append(li);
+  }
+}
+
+async function handle(query: string) {
+  if (!query.trim()) return;
+  say("Thinking…");
+  await ready;
+  const top = await recommend(query);
+  render(top);
+  say(`Top 3 for "${query}"`);
+  speak(
+    "Here are three picks. " +
+      top.map((b, i) => `${i + 1}: ${b.title} by ${b.author}. ${b.summary.replace("\n", " ")}`).join(" ")
+  );
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  handle(input.value);
+});
+
+// ---- Voice in: Web Speech recognition ----
+const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
+if (!SR) {
+  mic.disabled = true;
+  mic.title = "Speech recognition not supported in this browser (try Chrome or Edge)";
+} else {
+  const rec = new SR();
+  rec.lang = "en-US";
+  rec.interimResults = false;
+  rec.onresult = (e: any) => {
+    const text: string = e.results[0][0].transcript;
+    input.value = text;
+    handle(text);
+  };
+  rec.onend = () => mic.classList.remove("listening");
+  rec.onerror = (e: any) => say(`Mic error: ${e.error}`);
+  mic.addEventListener("click", () => {
+    speechSynthesis.cancel();
+    mic.classList.add("listening");
+    say("Listening…");
+    rec.start();
+  });
+}
